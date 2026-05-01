@@ -5,17 +5,18 @@ import { useRef, useEffect, useCallback } from "react";
 const MAX_CHROMA = 0.37;
 const SIZE = 700;
 const PADDING = 24;
+const INTER_GRID_GAP = 10; // px guaranteed between adjacent grid edges
 
 export interface ColorInfo {
-  l: number; // OKLCH lightness  0–1
-  c: number; // OKLCH chroma     0–MAX_CHROMA
-  h: number; // OKLCH hue        0–360
+  l: number;
+  c: number;
+  h: number;
 }
 
 interface CellIdx {
-  hi: number; // hue grid index
-  vi: number; // value column  (X axis — tangential)
-  ci: number; // chroma row    (Y axis — radial outward)
+  hi: number;
+  vi: number; // 0 = leftmost (dark)  → numValue-1 = rightmost (light)
+  ci: number; // 0 = top row (vivid)  → numChroma-1 = bottom row (grey)
 }
 
 interface Props {
@@ -36,44 +37,35 @@ export default function ColorWheel({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hovRef = useRef<CellIdx | null>(null);
 
-  // Compute the geometry that makes every grid fit inside the canvas without
-  // overlap. We solve for the cell size s and ring radius R simultaneously:
+  // Compute cell size s and ring radius R so that:
+  //   • grids don't overlap: chord(adjacent centres) ≥ max(gridW, gridH) + gap
+  //     chord = 2R sin(π/N)
+  //   • grids fit in canvas: R + max(gridW,gridH)/2 ≤ maxR
   //
-  //   Tangential fit:  numValue * s * (1 + gapFrac) = 2π R / numHues
-  //   Radial fit:      R + numChroma * s / 2 = maxR
-  //
-  // Eliminating R gives a closed-form for s.
+  // Solving both equalities simultaneously gives a closed form for s and R.
   const getLayout = useCallback(() => {
     const maxR = SIZE / 2 - PADDING;
-    const gapFrac = 0.15; // inter-cell gap as fraction of cellSize
+    const sinPN = Math.sin(Math.PI / numHues);
+    const M = Math.max(numValue, numChroma); // dominant grid dimension (cells)
 
     let s =
-      maxR /
-      (numChroma / 2 +
-        (numHues * numValue * (1 + gapFrac)) / (2 * Math.PI));
+      (2 * maxR * sinPN - INTER_GRID_GAP) / (M * (1 + sinPN));
 
-    // Clamp to keep cells legible at extreme slider values
     s = Math.max(4, Math.min(44, s));
 
-    let R = (numHues * numValue * s * (1 + gapFrac)) / (2 * Math.PI);
+    // R from canvas-fit constraint; non-overlap is guaranteed when s equals
+    // the formula above (and only slightly violated when s is clamped).
+    const R = Math.max(s, maxR - (M * s) / 2);
 
-    // Safety: if outer edge overshoots (due to clamping), scale both down
-    const outerEdge = R + (numChroma * s) / 2;
-    if (outerEdge > maxR) {
-      const scale = maxR / outerEdge;
-      s *= scale;
-      R *= scale;
-    }
-
-    const gap = Math.max(1.5, s * 0.1);
-    const cornerR = Math.min(4, s * 0.18);
+    const cellGap = Math.max(1.5, s * 0.1);
+    const cornerR = Math.min(4, s * 0.15);
 
     return {
       cx: SIZE / 2,
       cy: SIZE / 2,
       R,
-      s,          // cell size (includes gap border)
-      gap,
+      s,
+      cellGap,
       cornerR,
       gridW: numValue * s,
       gridH: numChroma * s,
@@ -86,53 +78,54 @@ export default function ColorWheel({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const { cx, cy, R, s, gap, cornerR, gridW, gridH } = getLayout();
+    const { cx, cy, R, s, cellGap, cornerR, gridW, gridH } = getLayout();
     const hov = hovRef.current;
 
     ctx.clearRect(0, 0, SIZE, SIZE);
 
     for (let hi = 0; hi < numHues; hi++) {
-      // θ = angle from centre to this grid's midpoint (12 o'clock = 0)
       const theta = hi * ((2 * Math.PI) / numHues) - Math.PI / 2;
       const hue = hi * (360 / numHues);
 
-      ctx.save();
-      // Place origin at the grid centre on the ring
-      ctx.translate(cx + R * Math.cos(theta), cy + R * Math.sin(theta));
-      // Rotate so local +Y points radially outward and local +X is tangential.
-      // ctx.rotate(θ) maps local (1,0) → (cos θ, sin θ) and local (0,1) →
-      // (-sin θ, cos θ).  We want local (0,1) = radial outward = (cos θ, sin θ),
-      // which requires rotation angle (θ − π/2).
-      ctx.rotate(theta - Math.PI / 2);
+      // Grid centre in canvas space — NO rotation, all grids stay upright
+      const gx = cx + R * Math.cos(theta);
+      const gy = cy + R * Math.sin(theta);
 
-      // Subtle grid background
+      // Subtle background card
       const bgPad = 4;
       ctx.fillStyle = "#161616";
       if (ctx.roundRect) {
         ctx.beginPath();
         ctx.roundRect(
-          -gridW / 2 - bgPad,
-          -gridH / 2 - bgPad,
+          gx - gridW / 2 - bgPad,
+          gy - gridH / 2 - bgPad,
           gridW + bgPad * 2,
           gridH + bgPad * 2,
           cornerR + bgPad
         );
         ctx.fill();
+      } else {
+        ctx.fillRect(
+          gx - gridW / 2 - bgPad,
+          gy - gridH / 2 - bgPad,
+          gridW + bgPad * 2,
+          gridH + bgPad * 2
+        );
       }
 
       for (let ci = 0; ci < numChroma; ci++) {
-        // ci = 0 → inner edge (low chroma), ci = numChroma-1 → outer edge (high chroma)
-        const chroma = ((ci + 0.5) / numChroma) * MAX_CHROMA;
+        // ci = 0 → top row → HIGH chroma (vivid at top, grey at bottom)
+        const chroma = ((numChroma - ci - 0.5) / numChroma) * MAX_CHROMA;
 
         for (let vi = 0; vi < numValue; vi++) {
+          // vi = 0 → left col → DARK (dark at left, light at right)
           const lightness = (vi + 0.5) / numValue;
 
-          const x = -gridW / 2 + vi * s + gap / 2;
-          const y = -gridH / 2 + ci * s + gap / 2;
-          const w = s - gap;
+          const x = gx - gridW / 2 + vi * s + cellGap / 2;
+          const y = gy - gridH / 2 + ci * s + cellGap / 2;
+          const w = s - cellGap;
 
           ctx.fillStyle = `oklch(${lightness} ${chroma} ${hue})`;
-
           if (cornerR > 1 && ctx.roundRect) {
             ctx.beginPath();
             ctx.roundRect(x, y, w, w, cornerR);
@@ -141,7 +134,6 @@ export default function ColorWheel({
             ctx.fillRect(x, y, w, w);
           }
 
-          // Hover highlight
           if (hov && hov.hi === hi && hov.vi === vi && hov.ci === ci) {
             ctx.strokeStyle = "rgba(255,255,255,0.9)";
             ctx.lineWidth = 2;
@@ -155,12 +147,9 @@ export default function ColorWheel({
           }
         }
       }
-
-      ctx.restore();
     }
   }, [numHues, numValue, numChroma, getLayout]);
 
-  // Reset hover when parameters change (avoids stale cell indices)
   useEffect(() => {
     hovRef.current = null;
     onHover(null);
@@ -170,12 +159,6 @@ export default function ColorWheel({
     drawWheel();
   }, [drawWheel]);
 
-  // Map a pointer position to a cell index.
-  // For each grid we apply the inverse of its canvas transform:
-  //   1. Subtract grid-centre world position
-  //   2. Inverse-rotate by (θ − π/2)
-  // The inverse rotation of angle α is: lx = dx·cos α + dy·sin α,
-  //                                       ly = −dx·sin α + dy·cos α
   const hitTest = useCallback(
     (clientX: number, clientY: number): CellIdx | null => {
       const canvas = canvasRef.current;
@@ -188,13 +171,12 @@ export default function ColorWheel({
 
       for (let hi = 0; hi < numHues; hi++) {
         const theta = hi * ((2 * Math.PI) / numHues) - Math.PI / 2;
-        const dx = px - (cx + R * Math.cos(theta));
-        const dy = py - (cy + R * Math.sin(theta));
+        const gx = cx + R * Math.cos(theta);
+        const gy = cy + R * Math.sin(theta);
 
-        // Inverse rotate by (theta − π/2)
-        const alpha = theta - Math.PI / 2;
-        const lx = dx * Math.cos(alpha) + dy * Math.sin(alpha);
-        const ly = -dx * Math.sin(alpha) + dy * Math.cos(alpha);
+        // No rotation — local coords are just the offset from grid centre
+        const lx = px - gx;
+        const ly = py - gy;
 
         if (
           lx >= -gridW / 2 &&
@@ -204,9 +186,8 @@ export default function ColorWheel({
         ) {
           const vi = Math.floor((lx + gridW / 2) / s);
           const ci = Math.floor((ly + gridH / 2) / s);
-          if (vi >= 0 && vi < numValue && ci >= 0 && ci < numChroma) {
+          if (vi >= 0 && vi < numValue && ci >= 0 && ci < numChroma)
             return { hi, vi, ci };
-          }
         }
       }
       return null;
@@ -217,7 +198,7 @@ export default function ColorWheel({
   const cellToColor = useCallback(
     ({ hi, vi, ci }: CellIdx): ColorInfo => ({
       l: (vi + 0.5) / numValue,
-      c: ((ci + 0.5) / numChroma) * MAX_CHROMA,
+      c: ((numChroma - ci - 0.5) / numChroma) * MAX_CHROMA,
       h: hi * (360 / numHues),
     }),
     [numHues, numValue, numChroma]

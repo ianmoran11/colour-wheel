@@ -273,11 +273,11 @@ export default function Home() {
             >
               <div className="flex gap-2">
                 <span className="text-neutral-400 font-medium">X axis</span>
-                <span>Value (lightness) — dark → light across each segment</span>
+                <span>Value — dark left, light right (every grid)</span>
               </div>
               <div className="flex gap-2">
                 <span className="text-neutral-400 font-medium">Y axis</span>
-                <span>Chroma (saturation) — grey → vivid outward from centre</span>
+                <span>Chroma — vivid top, grey bottom (every grid)</span>
               </div>
             </div>
           </section>
